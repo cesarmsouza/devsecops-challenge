@@ -133,9 +133,7 @@ jobs:
         with:
           aws-region: ${{ secrets.AWS_REGION }}
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
+          
       - name: Invoke Lambda (HTTP GET to endpoint)
         run: |
           PAYLOAD=$(printf '{"url":"http://%s/health","meta":{"repo":"%s/%s","tag":"%s"}}' \
