@@ -10,6 +10,7 @@ env:
   K8S_NAMESPACE: demo-app
   K8S_DEPLOYMENT: demo-app
   EKS_CLUSTER_NAME: devsecops
+  AWS_LAMBDA_NAME: ${{ secrets.AWS_LAMBDA_NAME }}
 
 jobs:
   build_scan_push:
@@ -24,7 +25,6 @@ jobs:
       - name: Install Semgrep
         run: pip install semgrep
       - name: Run Semgrep (SAST)
-        shell: bash
         run: |
           if [ -f security/semgrep.yml ]; then
             semgrep ci --config security/semgrep.yml || true
@@ -56,7 +56,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ---- Assume role via OIDC (ou Access Keys se você definir) ----
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -111,8 +110,7 @@ jobs:
             owasp-zap-report.html
 
   notify_lambda:
-    # roda só se você definir AWS_LAMBDA_NAME nos Secrets
-    if: ${{ secrets.AWS_LAMBDA_NAME != '' }}
+    if: ${{ env.AWS_LAMBDA_NAME != '' }}
     needs: [build_scan_push]
     runs-on: ubuntu-latest
     steps:
@@ -129,7 +127,7 @@ jobs:
           PAYLOAD=$(printf '{"url":"http://%s/health","meta":{"repo":"%s/%s","tag":"%s"}}' \
             "${{ secrets.APP_PUBLIC_HOST }}" "${{ secrets.DOCKERHUB_USERNAME }}" "${{ env.IMAGE_NAME }}" "${{ github.sha }}")
           aws lambda invoke \
-            --function-name ${{ secrets.AWS_LAMBDA_NAME }} \
+            --function-name "${{ env.AWS_LAMBDA_NAME }}" \
             --payload "$PAYLOAD" \
             --cli-binary-format raw-in-base64-out \
             response.json
