@@ -14,6 +14,9 @@ env:
 jobs:
   build_scan_push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v4
 
@@ -52,10 +55,13 @@ jobs:
   deploy:
     needs: build_scan_push
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write     # necessário para OIDC (assume role)
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials
+      - name: Configure AWS Credentials (OIDC or Keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ secrets.AWS_REGION }}
@@ -109,15 +115,20 @@ jobs:
             owasp-zap-report.html
 
   notify_lambda:
-    needs: [build_scan_push]
+    needs: build_scan_push
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
-      - name: Skipping notify: AWS_LAMBDA_NAME not set
-        if: ${{ secrets.AWS_LAMBDA_NAME == '' }}
-        run: echo "No AWS_LAMBDA_NAME secret. Skipping Lambda notification."
+      - name: Check if AWS_LAMBDA_NAME is set
+        run: |
+          if [ -z "${{ secrets.AWS_LAMBDA_NAME }}" ]; then
+            echo "AWS_LAMBDA_NAME not set. Skipping notify."
+            exit 78  # neutral
+          fi
 
       - name: Configure AWS Credentials
-        if: ${{ secrets.AWS_LAMBDA_NAME != '' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ secrets.AWS_REGION }}
@@ -126,7 +137,6 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Invoke Lambda (HTTP GET to endpoint)
-        if: ${{ secrets.AWS_LAMBDA_NAME != '' }}
         run: |
           PAYLOAD=$(printf '{"url":"http://%s/health","meta":{"repo":"%s/%s","tag":"%s"}}' \
             "${{ secrets.APP_PUBLIC_HOST }}" "${{ secrets.DOCKERHUB_USERNAME }}" "${{ env.IMAGE_NAME }}" "${{ github.sha }}")
