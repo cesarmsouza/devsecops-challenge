@@ -1,0 +1,137 @@
+# se ainda não tiver o repo local no CloudShell:
+git clone https://github.com/cesarmsouza/devsecops-challenge.git
+cd devsecops-challenge
+
+mkdir -p .github/workflows
+cat > .github/workflows/ci-cd.yml <<'YAML'
+name: CI-CD (EKS + OIDC)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: demo-app
+  K8S_NAMESPACE: demo-app
+  K8S_DEPLOYMENT: demo-app
+  EKS_CLUSTER_NAME: devsecops
+
+jobs:
+  build_scan_push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: Install Semgrep
+        run: pip install semgrep
+      - name: Run Semgrep (SAST)
+        run: semgrep ci --config security/semgrep.yml || true
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.2
+      - name: Trivy FS scan (dependencies/IaC)
+        run: trivy fs --exit-code 0 --no-progress --severity HIGH,CRITICAL .
+
+      - name: Docker login (Docker Hub)
+        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+      - name: Build image
+        run: |
+          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+                       -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest .
+      - name: Trivy image scan
+        run: trivy image --exit-code 0 --no-progress --severity HIGH,CRITICAL ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+      - name: Push image
+        run: |
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+
+  deploy:
+    needs: build_scan_push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC or Keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Update kubeconfig (EKS)
+        run: aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region ${{ secrets.AWS_REGION }}
+
+      - name: Create namespace (idempotent)
+        run: kubectl apply -f k8s/namespace.yaml
+
+      - name: Create Docker registry secret (idempotent)
+        run: |
+          kubectl -n ${{ env.K8S_NAMESPACE }} delete secret dockerhub-cred --ignore-not-found
+          kubectl -n ${{ env.K8S_NAMESPACE }} create secret docker-registry dockerhub-cred \
+            --docker-server=https://index.docker.io/v1/ \
+            --docker-username=${{ secrets.DOCKERHUB_USERNAME }} \
+            --docker-password=${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Apply Service
+        run: kubectl -n ${{ env.K8S_NAMESPACE }} apply -f k8s/service.yaml
+
+      - name: Apply Deployment with image tag
+        run: |
+          sed "s|DOCKERHUB_USERNAME/demo-app:latest|${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}|g" k8s/deployment.yaml | kubectl apply -f -
+
+      - name: Apply Ingress with host
+        run: |
+          sed "s|HOST_PLACEHOLDER|${{ secrets.APP_PUBLIC_HOST }}|g" k8s/ingress.yaml | kubectl -n ${{ env.K8S_NAMESPACE }} apply -f -
+          kubectl -n ${{ env.K8S_NAMESPACE }} rollout status deploy/${{ env.K8S_DEPLOYMENT }} --timeout=180s
+
+  dast:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: OWASP ZAP Baseline (HTTP)
+        uses: zaproxy/action-baseline@v0.13.0
+        with:
+          target: "http://${{ secrets.APP_PUBLIC_HOST }}/"
+          rules_file_name: "security/.zap-baseline.conf"
+          cmd_options: "-a -J zap_report.json"
+      - name: Publicar artefato ZAP
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: |
+            zap_report.json
+            owasp-zap-report.html
+
+  notify_lambda:
+    if: ${{ secrets.AWS_LAMBDA_NAME != '' }}
+    needs: [build_scan_push]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS Credentials (OIDC or Keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Invoke Lambda (HTTP GET to endpoint)
+        run: |
+          PAYLOAD=$(jq -n --arg url "http://${{ secrets.APP_PUBLIC_HOST }}/health" --arg repo "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}" --arg tag "${{ github.sha }}" \
+            '{url:$url, meta:{repo:$repo, tag:$tag}}')
+          aws lambda invoke \
+            --function-name ${{ secrets.AWS_LAMBDA_NAME }} \
+            --payload "$PAYLOAD" \
+            --cli-binary-format raw-in-base64-out \
+            response.json
+          cat response.json
+YAML
+
+git add .github/workflows/ci-cd.yml
+git -c user.name="cesarmsouza" -c user.email="cesarsouza.dpo@gmail.com" commit -m "Add CI/CD workflow"
+git push
