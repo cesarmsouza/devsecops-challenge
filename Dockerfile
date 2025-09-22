@@ -1,7 +1,7 @@
 FROM node:20-alpine AS build
 WORKDIR /app
 COPY app/package*.json ./
-RUN npm ci --only=production
+RUN npm install --omit=dev
 COPY app/ .
 
 FROM node:20-alpine
