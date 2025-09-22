@@ -101,6 +101,24 @@ jobs:
           sed "s|HOST_PLACEHOLDER|${{ secrets.APP_PUBLIC_HOST }}|g" k8s/ingress.yaml | kubectl -n ${{ env.K8S_NAMESPACE }} apply -f -
           kubectl -n ${{ env.K8S_NAMESPACE }} rollout status deploy/${{ env.K8S_DEPLOYMENT }} --timeout=180s
 
+      - name: Debug Deployment (image & pods & events)
+        run: |
+          echo "Image in deploy:"
+          kubectl -n ${{ env.K8S_NAMESPACE }} get deploy/${{ env.K8S_DEPLOYMENT }} -o jsonpath='{.spec.template.spec.containers[0].image}'; echo
+          echo
+          echo "Pods:"
+          kubectl -n ${{ env.K8S_NAMESPACE }} get pods -o wide
+          echo
+          echo "Describe pods (last events):"
+          kubectl -n ${{ env.K8S_NAMESPACE }} describe pods -l app=${{ env.K8S_DEPLOYMENT }} | tail -n 200
+          echo
+          echo "Namespace events:"
+          kubectl -n ${{ env.K8S_NAMESPACE }} get events --sort-by=.lastTimestamp | tail -n 100
+
+      - name: Wait rollout (10m)
+        run: kubectl -n ${{ env.K8S_NAMESPACE }} rollout status deploy/${{ env.K8S_DEPLOYMENT }} --timeout=600s
+
+
   dast:
     needs: deploy
     runs-on: ubuntu-latest
