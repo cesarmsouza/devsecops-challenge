@@ -10,7 +10,6 @@ env:
   K8S_NAMESPACE: demo-app
   K8S_DEPLOYMENT: demo-app
   EKS_CLUSTER_NAME: devsecops
-  AWS_LAMBDA_NAME: ${{ secrets.AWS_LAMBDA_NAME }}
 
 jobs:
   build_scan_push:
@@ -110,11 +109,15 @@ jobs:
             owasp-zap-report.html
 
   notify_lambda:
-    if: ${{ env.AWS_LAMBDA_NAME != '' }}
     needs: [build_scan_push]
     runs-on: ubuntu-latest
     steps:
+      - name: Skipping notify: AWS_LAMBDA_NAME not set
+        if: ${{ secrets.AWS_LAMBDA_NAME == '' }}
+        run: echo "No AWS_LAMBDA_NAME secret. Skipping Lambda notification."
+
       - name: Configure AWS Credentials
+        if: ${{ secrets.AWS_LAMBDA_NAME != '' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ secrets.AWS_REGION }}
@@ -123,11 +126,12 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Invoke Lambda (HTTP GET to endpoint)
+        if: ${{ secrets.AWS_LAMBDA_NAME != '' }}
         run: |
           PAYLOAD=$(printf '{"url":"http://%s/health","meta":{"repo":"%s/%s","tag":"%s"}}' \
             "${{ secrets.APP_PUBLIC_HOST }}" "${{ secrets.DOCKERHUB_USERNAME }}" "${{ env.IMAGE_NAME }}" "${{ github.sha }}")
           aws lambda invoke \
-            --function-name "${{ env.AWS_LAMBDA_NAME }}" \
+            --function-name "${{ secrets.AWS_LAMBDA_NAME }}" \
             --payload "$PAYLOAD" \
             --cli-binary-format raw-in-base64-out \
             response.json
