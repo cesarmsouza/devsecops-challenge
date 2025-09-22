@@ -39,6 +39,8 @@ jobs:
         uses: aquasecurity/setup-trivy@v0.2.2
       - name: Trivy FS scan
         run: trivy fs --exit-code 0 --no-progress --severity HIGH,CRITICAL .
+
+      # ---- Build & Push (Docker Hub) ----
       - name: Docker login (Docker Hub)
         run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
       - name: Build image
@@ -56,25 +58,25 @@ jobs:
     needs: build_scan_push
     runs-on: ubuntu-latest
     permissions:
-      id-token: write     # necessário para OIDC (assume role)
+      id-token: write     # necessário para OIDC (assumir a role)
       contents: read
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials (OIDC or Keys)
+      - name: Configure AWS Credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ secrets.AWS_REGION }}
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Update kubeconfig (EKS)
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "${{ secrets.AWS_REGION }}"
+
+      - name: Sanity checks (auth)
         run: |
-         aws eks update-kubeconfig \
-         --name "$EKS_CLUSTER_NAME" \
-         --region "${{ secrets.AWS_REGION }}" \
-         --role-arn "${{ secrets.AWS_ROLE_TO_ASSUME }}"
+          aws sts get-caller-identity
+          kubectl config current-context
+          kubectl auth can-i get pods --all-namespaces
 
       - name: Create namespace (idempotent)
         run: kubectl apply -f k8s/namespace.yaml
@@ -132,12 +134,12 @@ jobs:
             exit 78  # neutral
           fi
 
-      - name: Configure AWS Credentials
+      - name: Configure AWS Credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ secrets.AWS_REGION }}
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          
+
       - name: Invoke Lambda (HTTP GET to endpoint)
         run: |
           PAYLOAD=$(printf '{"url":"http://%s/health","meta":{"repo":"%s/%s","tag":"%s"}}' \
